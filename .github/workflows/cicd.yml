@@ -7,6 +7,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   AWS_REGION: ap-southeast-2
 
@@ -41,16 +44,17 @@ jobs:
           cache: npm
           cache-dependency-path: ${{ matrix.app }}/package-lock.json
 
-      - run: npm ci
+      - name: Install Dependencies
+        run: npm ci
 
-      - name: Generate Prisma client
+      - name: Generate Prisma Client
         if: matrix.app == 'server'
         run: npx prisma generate
 
-      - name: Build
+      - name: Build Application
         run: npm run build
 
-  # ---------- 2. BUILD SERVER AND MIGRATE IMAGES ----------
+  # ---------- 2. BUILD BACKEND AND MIGRATION IMAGES ----------
   build:
     name: Push image (${{ matrix.name }})
     needs: test
@@ -82,7 +86,7 @@ jobs:
       - name: Setup Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push
+      - name: Build and Push Image
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
@@ -94,7 +98,7 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,scope=${{ matrix.name }},mode=max
 
-  # ---------- 3. BUILD FRONTEND DOCKER IMAGE ----------
+  # ---------- 3. BUILD FRONTEND DOCKER IMAGE FOR EC2 ----------
   build-client:
     name: Push image (client)
     needs: test
@@ -114,7 +118,7 @@ jobs:
       - name: Setup Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push client
+      - name: Build and Push Client Image
         uses: docker/build-push-action@v6
         with:
           context: ./client
@@ -129,13 +133,14 @@ jobs:
 
   # ---------- 4. DEPLOY ALL CONTAINERS ON EC2 ----------
   deploy:
-    name: Deploy Backend and Frontend on EC2
+    name: Deploy Application on EC2
     needs: [build, build-client]
     if: github.event_name != 'pull_request'
     runs-on: self-hosted
 
     env:
       COMPOSE_PROJECT_NAME: todo-dnd
+
       DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
       IMAGE_TAG: ${{ github.sha }}
 
@@ -146,7 +151,8 @@ jobs:
       API_PORT: 4000
       WEB_PORT: 3000
 
-      CLIENT_ORIGIN: http://54.206.113.134:3000
+      # S3 website origin is used for cross-origin API requests.
+      CLIENT_ORIGIN: http://mern-s3-devops.s3-website-ap-southeast-2.amazonaws.com
 
     steps:
       - name: Checkout Source
@@ -167,12 +173,24 @@ jobs:
       - name: Check Running Containers
         run: docker compose ps
 
-      - name: Remove dangling images
+      - name: Verify EC2 Frontend and Backend
+        run: |
+          for i in {1..12}; do
+            if curl -fsS http://127.0.0.1:3000/healthz; then
+              break
+            fi
+            sleep 5
+          done
+
+          curl -fsS http://127.0.0.1:3000/healthz
+          curl -fsS http://127.0.0.1:4000/health
+
+      - name: Remove Dangling Images
         run: docker image prune -f
 
-  # ---------- 5. DEPLOY FRONTEND TO S3 ----------
+  # ---------- 5. BUILD AND DEPLOY FRONTEND TO S3 ----------
   deploy-client:
-    name: Deploy client to S3
+    name: Deploy Frontend to S3
     needs: deploy
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -188,22 +206,23 @@ jobs:
           cache: npm
           cache-dependency-path: client/package-lock.json
 
-      - name: Build client for S3
+      - name: Build Client for S3
         working-directory: client
         env:
           VITE_API_URL: ${{ vars.VITE_API_URL }}
         run: |
+          test -n "$VITE_API_URL" || (echo "VITE_API_URL repository variable is missing" && exit 1)
           npm ci
           npm run build
 
-      - name: Configure AWS credentials
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ap-southeast-2
 
-      - name: Upload assets
+      - name: Upload Static Assets
         run: |
           aws s3 sync client/dist s3://mern-s3-devops \
             --delete \

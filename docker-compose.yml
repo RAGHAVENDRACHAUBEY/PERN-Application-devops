@@ -58,11 +58,10 @@ services:
       DATABASE_URL: *db_url
       PORT: 4000
       # Set CLIENT_ORIGIN to the S3/CloudFront URL when the client is hosted there (CORS).
-      CLIENT_ORIGIN: ${CLIENT_ORIGIN:-http://localhost:${WEB_PORT:-8080}}
+      CLIENT_ORIGIN: ${CLIENT_ORIGIN:-http://localhost:3000}
     # Published so a client on S3 can call the API directly (nginx isn't in the path).
     ports:
       - "${API_PORT:-4000}:4000"
-      - "${WEB_PORT:-3000}:8080"
 
   client:
     <<: *hardened
@@ -72,7 +71,7 @@ services:
       server:
         condition: service_healthy
     ports:
-      - "${WEB_PORT:-8080}:8080"
+      - "${WEB_PORT:-3000}:8080"
 
 volumes:
   pgdata:
