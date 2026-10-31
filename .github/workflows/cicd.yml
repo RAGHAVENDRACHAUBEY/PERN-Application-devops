@@ -9,6 +9,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+env:
+  AWS_REGION: ap-southeast-2 # Asia Pacific (Sydney)
+
 concurrency:
   group: cicd-${{ github.ref }}
   cancel-in-progress: true
@@ -19,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      max-parallel: 1   # run one at a time, in list order: server, then client
+      max-parallel: 1 # run one at a time, in list order: server, then client
       matrix:
         app: [server, client]
     defaults:
@@ -111,7 +114,7 @@ jobs:
   # ---------- 2. client: build once, upload to S3 (runs only after the server deploy succeeds) ----------
   deploy-client:
     name: Deploy client to S3
-    needs: deploy   # server first, then client
+    needs: deploy # server first, then client
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
@@ -136,7 +139,7 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_REGION }}
+          aws-region: ${{ env.AWS_REGION }}
       # Fingerprinted assets are cached for a year; index.html is uploaded last and never cached,
       # so a new deploy is picked up immediately and users never see a half-uploaded site.
       - name: Upload assets
@@ -148,4 +151,5 @@ jobs:
         run: >
           aws s3 cp client/dist/index.html s3://${{ vars.S3_BUCKET }}/index.html
           --cache-control "no-cache"
+
 # MONGO_PASSWORD='${{ secrets.MONGO_PASSWORD }}' integrationninjas/nodejs-app
