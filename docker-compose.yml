@@ -1,0 +1,77 @@
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-hardened: &hardened
+  restart: unless-stopped
+  init: true
+  logging: *logging
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-todo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-todo_dnd}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # One-shot: applies pending migrations, then exits. Safe with multiple API replicas.
+  migrate:
+    # `image` is what CI pushes and the server pulls; `build` still works for local use.
+    image: ${DOCKER_USERNAME:-local}/todo-dnd-migrate:${IMAGE_TAG:-latest}
+    build:
+      context: ./server
+      target: migrate
+    restart: "no"
+    logging: *logging
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: &db_url postgresql://${POSTGRES_USER:-todo}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-todo_dnd}?schema=public
+
+  server:
+    <<: *hardened
+    image: ${DOCKER_USERNAME:-local}/todo-dnd-server:${IMAGE_TAG:-latest}
+    build:
+      context: ./server
+      target: runtime
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: *db_url
+      PORT: 4000
+      # Set CLIENT_ORIGIN to the S3/CloudFront URL when the client is hosted there (CORS).
+      CLIENT_ORIGIN: ${CLIENT_ORIGIN:-http://localhost:${WEB_PORT:-8080}}
+    # Published so a client on S3 can call the API directly (nginx isn't in the path).
+    ports:
+      - "${API_PORT:-4000}:4000"
+
+  client:
+    <<: *hardened
+    image: ${DOCKER_USERNAME:-local}/todo-dnd-client:${IMAGE_TAG:-latest}
+    build: ./client
+    depends_on:
+      server:
+        condition: service_healthy
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+
+volumes:
+  pgdata:

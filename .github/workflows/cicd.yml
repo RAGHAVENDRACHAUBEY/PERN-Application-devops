@@ -1,0 +1,151 @@
+name: Deploy Todo DnD
+
+# client -> S3 (static files)    server + migrate + db -> Docker on the self-hosted runner
+
+on:
+  push:
+    branches:
+      - PERN-Application-devops
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: cicd-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Typecheck & build (${{ matrix.app }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1   # run one at a time, in list order: server, then client
+      matrix:
+        app: [server, client]
+    defaults:
+      run:
+        working-directory: ${{ matrix.app }}
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ${{ matrix.app }}/package-lock.json
+      - run: npm ci
+      - name: Generate Prisma client
+        if: matrix.app == 'server'
+        run: npx prisma generate
+      - name: Build
+        run: npm run build
+
+  # ---------- 1. server: Docker images -> Docker Hub -> run on self-hosted ----------
+  build:
+    name: Push image (${{ matrix.name }})
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: server
+            context: ./server
+            target: runtime
+          - name: migrate
+            context: ./server
+            target: migrate
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+      - name: Login to docker hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          target: ${{ matrix.target }}
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/todo-dnd-${{ matrix.name }}:latest
+            ${{ secrets.DOCKER_USERNAME }}/todo-dnd-${{ matrix.name }}:${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.name }},mode=max
+
+  deploy:
+    needs: build
+    runs-on: self-hosted
+    env:
+      COMPOSE_PROJECT_NAME: todo-dnd
+      DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+      IMAGE_TAG: ${{ github.sha }}
+      POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+      POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+      POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+      # The S3 website origin of the client, for CORS (built from the bucket and region).
+      # Sydney (ap-southeast-2) uses the dash form: s3-website-<region>, not s3-website.<region>.
+      CLIENT_ORIGIN: http://${{ vars.S3_BUCKET }}.s3-website-${{ vars.AWS_REGION }}.amazonaws.com
+    steps:
+      # Needed on the runner for docker-compose.yml (db, migrate and server run together).
+      - name: Checkout Source
+        uses: actions/checkout@v4
+      - name: Login to docker hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      - name: Pull images from docker hub
+        run: docker compose pull migrate server
+      - name: Start db, migrate, server
+        run: docker compose up -d --no-build db migrate server
+      - name: Remove dangling images
+        run: docker image prune -f
+
+  # ---------- 2. client: build once, upload to S3 (runs only after the server deploy succeeds) ----------
+  deploy-client:
+    name: Deploy client to S3
+    needs: deploy   # server first, then client
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - name: Build client
+        working-directory: client
+        env:
+          # Public API origin incl. /api, e.g. https://api.example.com/api (baked in at build time)
+          VITE_API_URL: ${{ vars.VITE_API_URL }}
+        run: |
+          npm ci
+          npm run build
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+      # Fingerprinted assets are cached for a year; index.html is uploaded last and never cached,
+      # so a new deploy is picked up immediately and users never see a half-uploaded site.
+      - name: Upload assets
+        run: >
+          aws s3 sync client/dist s3://${{ vars.S3_BUCKET }}
+          --delete --exclude index.html
+          --cache-control "public,max-age=31536000,immutable"
+      - name: Upload index.html
+        run: >
+          aws s3 cp client/dist/index.html s3://${{ vars.S3_BUCKET }}/index.html
+          --cache-control "no-cache"
+# MONGO_PASSWORD='${{ secrets.MONGO_PASSWORD }}' integrationninjas/nodejs-app
