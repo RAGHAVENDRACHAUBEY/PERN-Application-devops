@@ -209,7 +209,9 @@ jobs:
       - name: Build Client for S3
         working-directory: client
         env:
-          VITE_API_URL: ${{ vars.VITE_API_URL }}
+          # VITE_API_URL: ${{ vars.VITE_API_URL }}
+
+          VITE_API_URL: http://54.206.113.134:4000/api
         run: |
           test -n "$VITE_API_URL" || (echo "VITE_API_URL repository variable is missing" && exit 1)
           npm ci
