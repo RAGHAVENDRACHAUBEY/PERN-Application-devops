@@ -94,7 +94,7 @@ jobs:
       POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
       # The S3 website origin of the client, for CORS (built from the bucket and region).
       # Sydney (ap-southeast-2) uses the dash form: s3-website-<region>, not s3-website.<region>.
-      CLIENT_ORIGIN: http://${{ vars.S3_BUCKET }}.s3-website-${{ vars.AWS_REGION }}.amazonaws.com
+      CLIENT_ORIGIN: http://${{ vars.S3_BUCKET }}.s3-website-${{ env.AWS_REGION }}.amazonaws.com
     steps:
       # Needed on the runner for docker-compose.yml (db, migrate and server run together).
       - name: Checkout Source
